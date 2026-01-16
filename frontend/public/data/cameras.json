@@ -1,0 +1,16 @@
+{
+    "cameras": [
+        {
+            "id": "cam-001",
+            "province_code": "TH56",
+            "province_name": "Phayao",
+            "province_name_th": "พะเยา",
+            "rtsp_url": "rtsp://admin:luis2547@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0",
+            "status": "inactive",
+            "location": {
+                "lat": 19.1641,
+                "lng": 99.9013
+            }
+        }
+    ]
+}

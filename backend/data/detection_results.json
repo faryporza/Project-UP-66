@@ -1,0 +1,58 @@
+{
+    "last_update": null,
+    "total_count": 0,
+    "counts": {
+        "ambulance": 0,
+        "boxtruck": 0,
+        "bus": 0,
+        "e_tan": 0,
+        "hatchback": 0,
+        "jeep": 0,
+        "mini_truck": 0,
+        "motorcycle": 0,
+        "pickup": 0,
+        "saleng": 0,
+        "sedan": 0,
+        "songthaew": 0,
+        "supercar": 0,
+        "suv": 0,
+        "taxi": 0,
+        "truck": 0,
+        "tuktuk": 0,
+        "van": 0
+    },
+    "counts_th": {
+        "รถพยาบาล": 0,
+        "รถบรรทุกกล่อง": 0,
+        "รถบัส": 0,
+        "อีแต๋น": 0,
+        "รถแฮทช์แบ็ก": 0,
+        "รถจี๊ป": 0,
+        "รถกระบะเล็ก": 0,
+        "รถจักรยานยนต์": 0,
+        "รถกระบะ": 0,
+        "ซาเล้ง": 0,
+        "รถเก๋ง": 0,
+        "รถสองแถว": 0,
+        "ซุปเปอร์คาร์": 0,
+        "รถ SUV": 0,
+        "รถแท็กซี่": 0,
+        "รถบรรทุก": 0,
+        "รถตุ๊กตุ๊ก": 0,
+        "รถตู้": 0
+    },
+    "cameras": [
+        {
+            "id": "cam-001",
+            "province_code": "TH56",
+            "province_name": "Phayao",
+            "province_name_th": "พะเยา",
+            "rtsp_url": "rtsp://admin:luis2547@192.168.1.108:554/cam/realmonitor?channel=1&subtype=0",
+            "status": "inactive",
+            "location": {
+                "lat": 19.1641,
+                "lng": 99.9013
+            }
+        }
+    ]
+}
