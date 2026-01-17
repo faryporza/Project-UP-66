@@ -1,2 +1,6 @@
 /.github
-backend/models
+/backend/models/
+/backend/.venv
+/backend/__pycache__/
+/backend/video/
+/backend/.venv/lib/site-packages/__pycache__
