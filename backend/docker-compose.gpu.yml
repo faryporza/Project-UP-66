@@ -29,7 +29,6 @@ services:
             - driver: nvidia
               count: 1
               capabilities: [gpu]
-    # For webcam access
+    # For webcam access - use specific device instead of privileged mode
     devices:
       - /dev/video0:/dev/video0
-    privileged: true

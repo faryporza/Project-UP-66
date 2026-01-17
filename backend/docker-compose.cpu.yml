@@ -21,7 +21,6 @@ services:
       - LINE_Y_PERCENT=0.5
       - WORKER_ENABLED=true
     restart: unless-stopped
-    # For webcam access
+    # For webcam access - use specific device instead of privileged mode
     devices:
       - /dev/video0:/dev/video0
-    privileged: true
