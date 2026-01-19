@@ -1,0 +1,15 @@
+# Core dependencies
+fastapi~=0.109.0
+uvicorn[standard]~=0.27.0
+pydantic~=2.5.3
+
+# Computer vision
+opencv-python~=4.9.0
+numpy~=1.26.0
+
+# YOLO
+ultralytics~=8.1.0
+
+# Optional dependencies for GPU support
+# torch==2.1.2+cu121 -f https://download.pytorch.org/whl/torch_stable.html
+# torchvision==0.16.2+cu121 -f https://download.pytorch.org/whl/torch_stable.html
