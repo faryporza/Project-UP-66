@@ -1,134 +1,321 @@
-import time
-import cv2
-import numpy as np
-import mss
-from collections import defaultdict
-from ultralytics import YOLO
+import os
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 
-# ========= ตั้งค่า =========
-MODEL_PATH = "model/best.mlpackage"        # หรือ yolov8n.pt
-CONF = 0.05
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from motor.motor_asyncio import AsyncIOMotorClient
+from dotenv import load_dotenv
 
-# เลือก monitor ที่จะจับ (1 = จอหลัก)
-MONITOR_INDEX = 1
+load_dotenv()
 
-# ถ้าอยากจับเฉพาะบางส่วนของจอ (แนะนำเพื่อให้เร็วขึ้น)
-USE_REGION = True
-REGION = {"left": 200, "top": 120, "width": 1280, "height": 720}  # ปรับให้ตรงกับบริเวณที่มีถนน/กล้องบนจอ
+MONGODB_URL = os.getenv("MONGODB_URL")
+if not MONGODB_URL:
+    raise RuntimeError("Missing MONGODB_URL in .env")
 
-# เส้นนับ ภายใน "ภาพที่จับมา" (พิกัดอ้างอิงจาก region/frame)
-LINE_P1 = (141, 86)
-LINE_P2 = (133, 648)
+app = FastAPI(title="Vehicle Counter API")
 
-# ถ้ารู้ class id ที่เป็นรถและอยากนับเฉพาะนั้น
-# COCO ทั่วไป: car=2, motorcycle=3, bus=5, truck=7
-COUNT_CLASSES = None   # เช่น {2,3,5,7} หรือ None = นับทุก class
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# Tracker config
-TRACKER = "bytetrack.yaml"
-# ==========================
+client = AsyncIOMotorClient(MONGODB_URL)
+db = client.get_default_database()  # ใช้ db จาก URL (vehicle_counter)
 
-
-def side_of_line(p, a, b):
-    """บอกว่าจุด p อยู่ด้านไหนของเส้น a->b (ค่าบวก/ลบ)"""
-    return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
+cameras = db["cameras"]
+lines = db["lines"]
+counts = db["counts"]
 
 
-def main():
-    model = YOLO(MODEL_PATH)
-    names = model.names  # dict {id: name}
-
-    # สถานะฝั่งเส้นของ track id ก่อนหน้า
-    last_side = {}
-    # กันนับซ้ำ (นับ 1 ครั้งต่อ id)
-    counted_ids = set()
-    # นับแยกตาม class name
-    counts = defaultdict(int)
-
-    prev_t = time.time()
-
-    with mss.mss() as sct:
-        monitor = sct.monitors[MONITOR_INDEX]
-        grab_area = REGION if USE_REGION else monitor
-
-        while True:
-            # 1) จับภาพหน้าจอ
-            img = np.array(sct.grab(grab_area), dtype=np.uint8)      # BGRA
-            frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)            # BGR
-            h, w = frame.shape[:2]
-
-            # 2) YOLO track บน frame
-            results = model.track(
-                source=frame,
-                conf=CONF,
-                persist=True,
-                tracker=TRACKER,
-                verbose=False
-            )
-
-            r = results[0]
-
-            # 3) วาดเส้นนับ
-            cv2.line(frame, LINE_P1, LINE_P2, (0, 0, 255), 3)
-
-            # 4) อ่าน boxes + class + id
-            if r.boxes is not None and len(r.boxes) > 0 and r.boxes.id is not None:
-                boxes = r.boxes.xyxy.cpu().numpy().astype(int)
-                clss = r.boxes.cls.cpu().numpy().astype(int)
-                ids = r.boxes.id.cpu().numpy().astype(int)
-
-                for (x1, y1, x2, y2), cls_id, tid in zip(boxes, clss, ids):
-                    if COUNT_CLASSES is not None and int(cls_id) not in COUNT_CLASSES:
-                        continue
-
-                    # center point
-                    cx = (x1 + x2) // 2
-                    cy = (y1 + y2) // 2
-
-                    # วาดกล่อง/label
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
-                    cls_name = names.get(int(cls_id), str(int(cls_id)))
-                    cv2.putText(frame, f"{cls_name} #{int(tid)}", (x1, max(20, y1 - 8)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-
-                    # 5) Logic ข้ามเส้น (นับ 1 ครั้งต่อ track id)
-                    cur_side = side_of_line((cx, cy), LINE_P1, LINE_P2)
-                    prev_side = last_side.get(int(tid))
-
-                    if prev_side is not None:
-                        crossed = (prev_side < 0 and cur_side > 0) or (prev_side > 0 and cur_side < 0)
-                        if crossed and int(tid) not in counted_ids:
-                            counts[cls_name] += 1
-                            counted_ids.add(int(tid))
-
-                    last_side[int(tid)] = cur_side
-
-            # 6) แสดง FPS + counts
-            now = time.time()
-            fps = 1.0 / max(now - prev_t, 1e-6)
-            prev_t = now
-            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
-
-            y = 60
-            cv2.putText(frame, "Counts:", (10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-            y += 28
-            for k, v in sorted(counts.items()):
-                cv2.putText(frame, f"{k}: {v}", (10, y),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
-                y += 24
-
-            cv2.imshow("Screen Vehicle Counting", frame)
-
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord("q"):
-                break
-
-    cv2.destroyAllWindows()
-    print("Final counts:", dict(counts))
+def _split_csv(value: Optional[str]) -> Optional[List[str]]:
+    if not value:
+        return None
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    return items or None
 
 
-if __name__ == "__main__":
-    main()
+# ---------- Pydantic Models ----------
+class CameraIn(BaseModel):
+    camera_id: str
+    name: str
+    rtsp: str
+
+
+class Point(BaseModel):
+    x: int
+    y: int
+
+
+class LineIn(BaseModel):
+    line_id: str
+    camera_id: str
+    p1: Point
+    p2: Point
+    is_active: bool = True
+
+
+class CountIn(BaseModel):
+    count_id: str
+    camera_id: str
+    line_id: str
+    track_id: int
+    class_name: str = Field(..., alias="class")  # รับ key ชื่อ "class"
+    time: datetime
+
+
+# ---------- Startup: Create Indexes ----------
+@app.on_event("startup")
+async def startup():
+    # cameras: unique camera_id
+    await cameras.create_index("camera_id", unique=True)
+
+    # lines: unique line_id, index camera_id + is_active
+    await lines.create_index("line_id", unique=True)
+    await lines.create_index([("camera_id", 1)])
+    await lines.create_index([("camera_id", 1), ("is_active", 1)])
+
+    # counts: unique count_id + dashboard indexes + unique anti-duplicate
+    await counts.create_index("count_id", unique=True)
+    await counts.create_index([("camera_id", 1), ("time", -1)])
+    await counts.create_index([("camera_id", 1), ("class", 1), ("time", -1)])
+    # กันนับซ้ำ: 1 track_id ต่อ 1 line_id ต่อ 1 camera_id
+    await counts.create_index([("camera_id", 1), ("line_id", 1), ("track_id", 1)], unique=True)
+
+
+# ---------- Cameras ----------
+@app.post("/cameras")
+async def create_camera(payload: CameraIn):
+    doc = payload.model_dump()
+    doc["created_at"] = datetime.now()
+    doc["updated_at"] = datetime.now()
+    try:
+        await cameras.insert_one(doc)
+    except Exception as e:
+        # ถ้า camera_id ซ้ำ
+        raise HTTPException(status_code=409, detail=f"create_camera failed: {str(e)}")
+    return {"ok": True, "camera_id": payload.camera_id}
+
+
+@app.get("/cameras")
+async def list_cameras():
+    items = []
+    async for c in cameras.find({}, {"_id": 0}):
+        items.append(c)
+    return {"items": items}
+
+
+@app.get("/cameras/{camera_id}")
+async def get_camera(camera_id: str):
+    c = await cameras.find_one({"camera_id": camera_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(status_code=404, detail="camera not found")
+    return c
+
+
+# ---------- Health ----------
+@app.get("/health")
+async def health_check():
+    return {"ok": True, "time": datetime.utcnow()}
+
+
+# ---------- Lines ----------
+@app.post("/lines")
+async def create_line(payload: LineIn):
+    # ตรวจว่ากล้องมีจริง
+    cam = await cameras.find_one({"camera_id": payload.camera_id})
+    if not cam:
+        raise HTTPException(status_code=404, detail="camera not found")
+
+    doc = payload.model_dump()
+    doc["created_at"] = datetime.now()
+    doc["updated_at"] = datetime.now()
+
+    # ถ้าตั้ง active = true ให้ปิด active เดิมของกล้องนี้ก่อน (เลือกได้)
+    if doc.get("is_active", True):
+        await lines.update_many(
+            {"camera_id": payload.camera_id, "is_active": True},
+            {"$set": {"is_active": False, "updated_at": datetime.now()}}
+        )
+
+    try:
+        await lines.insert_one(doc)
+    except Exception as e:
+        raise HTTPException(status_code=409, detail=f"create_line failed: {str(e)}")
+    return {"ok": True, "line_id": payload.line_id}
+
+
+@app.get("/lines/active/{camera_id}")
+async def get_active_line(camera_id: str):
+    line = await lines.find_one({"camera_id": camera_id, "is_active": True}, {"_id": 0})
+    if not line:
+        raise HTTPException(status_code=404, detail="active line not found")
+    return line
+
+
+@app.patch("/lines/{line_id}/activate")
+async def activate_line(line_id: str):
+    line = await lines.find_one({"line_id": line_id})
+    if not line:
+        raise HTTPException(status_code=404, detail="line not found")
+
+    camera_id = line["camera_id"]
+    await lines.update_many(
+        {"camera_id": camera_id},
+        {"$set": {"is_active": False, "updated_at": datetime.now()}}
+    )
+    await lines.update_one(
+        {"line_id": line_id},
+        {"$set": {"is_active": True, "updated_at": datetime.now()}}
+    )
+    return {"ok": True, "line_id": line_id, "camera_id": camera_id}
+
+
+# ---------- Counts (Events) ----------
+@app.post("/counts")
+async def insert_count(payload: CountIn):
+    doc = payload.model_dump(by_alias=True)
+    # payload รับ "class" แต่เราเก็บ field เป็น "class" ตามที่คุณกำหนด
+    # (pydantic alias class_name -> "class")
+    doc["class"] = doc.pop("class_name")
+    try:
+        await counts.insert_one(doc)
+        return {"ok": True, "count_id": payload.count_id}
+    except Exception as e:
+        # ถ้าโดน unique (camera_id+line_id+track_id) = นับซ้ำ
+        # เราจะตอบ 409 และบอกว่า duplicate
+        msg = str(e)
+        if "duplicate key" in msg.lower():
+            raise HTTPException(status_code=409, detail="duplicate count (same camera_id+line_id+track_id)")
+        raise HTTPException(status_code=500, detail=f"insert_count failed: {msg}")
+
+
+# Dashboard: นับแยก class ในช่วงเวลา
+@app.get("/counts/by-class")
+async def count_by_class(
+    start: datetime,
+    end: datetime,
+    camera_id: Optional[str] = None,
+    camera_ids: Optional[str] = Query(default=None, description="Comma-separated camera IDs"),
+    classes: Optional[str] = Query(default=None, description="Comma-separated class names")
+):
+    camera_list = _split_csv(camera_ids) or _split_csv(camera_id)
+    class_list = _split_csv(classes)
+    match: Dict[str, Any] = {"time": {"$gte": start, "$lte": end}}
+    if camera_list:
+        match["camera_id"] = {"$in": camera_list}
+    if class_list:
+        match["class"] = {"$in": class_list}
+
+    pipeline = [
+        {"$match": match},
+        {"$group": {"_id": "$class", "total": {"$sum": 1}}},
+        {"$sort": {"total": -1}}
+    ]
+    out = []
+    async for row in counts.aggregate(pipeline):
+        out.append({"class": row["_id"], "total": row["total"]})
+    return {"start": start, "end": end, "items": out}
+
+
+@app.get("/counts/by-camera")
+async def count_by_camera(
+    start: datetime,
+    end: datetime,
+    camera_id: Optional[str] = None,
+    camera_ids: Optional[str] = Query(default=None, description="Comma-separated camera IDs"),
+    classes: Optional[str] = Query(default=None, description="Comma-separated class names")
+):
+    camera_list = _split_csv(camera_ids) or _split_csv(camera_id)
+    class_list = _split_csv(classes)
+    match: Dict[str, Any] = {"time": {"$gte": start, "$lte": end}}
+    if camera_list:
+        match["camera_id"] = {"$in": camera_list}
+    if class_list:
+        match["class"] = {"$in": class_list}
+
+    pipeline = [
+        {"$match": match},
+        {"$group": {"_id": "$camera_id", "total": {"$sum": 1}}},
+        {"$sort": {"total": -1}}
+    ]
+    out = []
+    async for row in counts.aggregate(pipeline):
+        out.append({"camera_id": row["_id"], "total": row["total"]})
+    return {"start": start, "end": end, "items": out}
+
+
+@app.get("/counts/by-time")
+async def count_by_time(
+    start: datetime,
+    end: datetime,
+    bucket: str = Query(default="hour", description="hour or day"),
+    camera_id: Optional[str] = None,
+    camera_ids: Optional[str] = Query(default=None, description="Comma-separated camera IDs"),
+    classes: Optional[str] = Query(default=None, description="Comma-separated class names")
+):
+    camera_list = _split_csv(camera_ids) or _split_csv(camera_id)
+    class_list = _split_csv(classes)
+    match: Dict[str, Any] = {"time": {"$gte": start, "$lte": end}}
+    if camera_list:
+        match["camera_id"] = {"$in": camera_list}
+    if class_list:
+        match["class"] = {"$in": class_list}
+
+    if bucket == "day":
+        time_format = "%Y-%m-%d"
+    else:
+        time_format = "%Y-%m-%d %H:00"
+
+    pipeline = [
+        {"$match": match},
+        {
+            "$group": {
+                "_id": {
+                    "time": {"$dateToString": {"format": time_format, "date": "$time"}},
+                    "class": "$class",
+                },
+                "total": {"$sum": 1},
+            }
+        },
+        {"$sort": {"_id.time": 1}},
+    ]
+
+    time_map: Dict[str, Dict[str, int]] = {}
+    async for row in counts.aggregate(pipeline):
+        time_key = row["_id"]["time"]
+        class_key = row["_id"]["class"]
+        time_map.setdefault(time_key, {})[class_key] = row["total"]
+
+    items = [{"time": key, "by_class": time_map[key]} for key in sorted(time_map.keys())]
+    return {"start": start, "end": end, "bucket": bucket, "items": items}
+
+
+@app.get("/counts/recent")
+async def list_recent_counts(
+    limit: int = Query(default=100, ge=1, le=1000),
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    camera_id: Optional[str] = None,
+    camera_ids: Optional[str] = Query(default=None, description="Comma-separated camera IDs"),
+    classes: Optional[str] = Query(default=None, description="Comma-separated class names")
+):
+    camera_list = _split_csv(camera_ids) or _split_csv(camera_id)
+    class_list = _split_csv(classes)
+    match: Dict[str, Any] = {}
+    if start and end:
+        match["time"] = {"$gte": start, "$lte": end}
+    if camera_list:
+        match["camera_id"] = {"$in": camera_list}
+    if class_list:
+        match["class"] = {"$in": class_list}
+
+    cursor = counts.find(match, {"_id": 0}).sort("time", -1).limit(limit)
+    items = []
+    async for row in cursor:
+        items.append(row)
+    return {"items": items}
