@@ -1,152 +1,134 @@
-import os
-import json
+import time
 import cv2
+import numpy as np
+import mss
+from collections import defaultdict
 from ultralytics import YOLO
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-VIDEO_PATH = os.path.join(BASE_DIR, "video", "video.mp4")
-MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
-OUT_PATH = os.path.join(BASE_DIR, "output_detect.mp4")
-OUT_JSON = os.path.join(BASE_DIR, "count_result.json")
+# ========= ตั้งค่า =========
+MODEL_PATH = "model/best.mlpackage"        # หรือ yolov8n.pt
+CONF = 0.05
 
-CLASS_MAP = {
-    0: "ambulance",
-    1: "boxtruck",
-    2: "bus",
-    3: "e_tan",
-    4: "hatchback",
-    5: "jeep",
-    6: "mini_truck",
-    7: "motorcycle",
-    8: "pickup",
-    9: "saleng",
-    10: "sedan",
-    11: "songthaew",
-    12: "supercar",
-    13: "suv",
-    14: "taxi",
-    15: "truck",
-    16: "tuktuk",
-    17: "van",
-}
+# เลือก monitor ที่จะจับ (1 = จอหลัก)
+MONITOR_INDEX = 1
 
-# โหลดโมเดล
-model = YOLO(MODEL_PATH)
+# ถ้าอยากจับเฉพาะบางส่วนของจอ (แนะนำเพื่อให้เร็วขึ้น)
+USE_REGION = True
+REGION = {"left": 200, "top": 120, "width": 1280, "height": 720}  # ปรับให้ตรงกับบริเวณที่มีถนน/กล้องบนจอ
 
-# ตรวจสอบไฟล์
-if not os.path.exists(MODEL_PATH):
-    raise FileNotFoundError(f"❌ Cannot find model: {MODEL_PATH}")
-if not os.path.exists(VIDEO_PATH):
-    video_dir = os.path.join(BASE_DIR, "video")
-    available = []
-    if os.path.isdir(video_dir):
-        available = [f for f in os.listdir(video_dir) if os.path.isfile(os.path.join(video_dir, f))]
-    hint = f"Available files: {', '.join(available)}" if available else "No files found in video folder."
-    raise FileNotFoundError(f"❌ Cannot find video: {VIDEO_PATH}. {hint}")
+# เส้นนับ ภายใน "ภาพที่จับมา" (พิกัดอ้างอิงจาก region/frame)
+LINE_P1 = (141, 86)
+LINE_P2 = (133, 648)
 
-# เปิดวิดีโอ
-cap = cv2.VideoCapture(VIDEO_PATH)
-if not cap.isOpened():
-    raise FileNotFoundError(f"❌ Cannot open video: {VIDEO_PATH}")
+# ถ้ารู้ class id ที่เป็นรถและอยากนับเฉพาะนั้น
+# COCO ทั่วไป: car=2, motorcycle=3, bus=5, truck=7
+COUNT_CLASSES = None   # เช่น {2,3,5,7} หรือ None = นับทุก class
 
-# อ่านข้อมูลวิดีโอ
-fps = cap.get(cv2.CAP_PROP_FPS) or 30
-w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+# Tracker config
+TRACKER = "bytetrack.yaml"
+# ==========================
 
-# ตั้งค่า VideoWriter (mp4)
-fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-writer = cv2.VideoWriter(OUT_PATH, fourcc, fps, (w, h))
 
-print(f"✅ Start detecting: {VIDEO_PATH}")
-print(f"🎥 Output will be saved to: {OUT_PATH}")
-print(f"🧾 Count result will be saved to: {OUT_JSON}")
+def side_of_line(p, a, b):
+    """บอกว่าจุด p อยู่ด้านไหนของเส้น a->b (ค่าบวก/ลบ)"""
+    return (b[0]-a[0])*(p[1]-a[1]) - (b[1]-a[1])*(p[0]-a[0])
 
-# เส้นนับจำนวน (แนวนอนกลางภาพ)
-line_y = int(h * 0.6)
-line_color = (0, 255, 255)
 
-# ตัวแปรสำหรับนับ
-counts = {name: 0 for name in CLASS_MAP.values()}
-track_last_y = {}
-track_best = {}
-counted_ids = set()
+def main():
+    model = YOLO(MODEL_PATH)
+    names = model.names  # dict {id: name}
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+    # สถานะฝั่งเส้นของ track id ก่อนหน้า
+    last_side = {}
+    # กันนับซ้ำ (นับ 1 ครั้งต่อ id)
+    counted_ids = set()
+    # นับแยกตาม class name
+    counts = defaultdict(int)
 
-    # ตรวจจับ + ติดตาม (ช่วยแก้ปัญหา 1 คันหลายคลาส)
-    results = model.track(
-        frame,
-        conf=0.05,
-        iou=0.5,
-        device=0,
-        persist=True,
-        verbose=False,
-    )
+    prev_t = time.time()
 
-    annotated = frame.copy()
-    if results and results[0].boxes is not None and len(results[0].boxes) > 0:
-        boxes = results[0].boxes
-        ids = boxes.id.cpu().tolist() if boxes.id is not None else [None] * len(boxes)
-        clses = boxes.cls.cpu().tolist()
-        confs = boxes.conf.cpu().tolist()
-        xyxy = boxes.xyxy.cpu().tolist()
+    with mss.mss() as sct:
+        monitor = sct.monitors[MONITOR_INDEX]
+        grab_area = REGION if USE_REGION else monitor
 
-        for i in range(len(boxes)):
-            x1, y1, x2, y2 = map(int, xyxy[i])
-            cls_id = int(clses[i])
-            conf = float(confs[i])
-            track_id = int(ids[i]) if ids[i] is not None else None
+        while True:
+            # 1) จับภาพหน้าจอ
+            img = np.array(sct.grab(grab_area), dtype=np.uint8)      # BGRA
+            frame = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)            # BGR
+            h, w = frame.shape[:2]
 
-            cx = int((x1 + x2) / 2)
-            cy = int((y1 + y2) / 2)
+            # 2) YOLO track บน frame
+            results = model.track(
+                source=frame,
+                conf=CONF,
+                persist=True,
+                tracker=TRACKER,
+                verbose=False
+            )
 
-            label_name = CLASS_MAP.get(cls_id, model.names.get(cls_id, str(cls_id)))
+            r = results[0]
 
-            # เก็บคลาสที่มั่นใจที่สุดต่อ track id
-            if track_id is not None:
-                best = track_best.get(track_id)
-                if best is None or conf > best[1]:
-                    track_best[track_id] = (label_name, conf)
+            # 3) วาดเส้นนับ
+            cv2.line(frame, LINE_P1, LINE_P2, (0, 0, 255), 3)
 
-                prev_y = track_last_y.get(track_id)
-                track_last_y[track_id] = cy
+            # 4) อ่าน boxes + class + id
+            if r.boxes is not None and len(r.boxes) > 0 and r.boxes.id is not None:
+                boxes = r.boxes.xyxy.cpu().numpy().astype(int)
+                clss = r.boxes.cls.cpu().numpy().astype(int)
+                ids = r.boxes.id.cpu().numpy().astype(int)
 
-                # ข้ามเส้นจากบนลงล่างหรือจากล่างขึ้นบน (นับครั้งเดียว)
-                if prev_y is not None and track_id not in counted_ids:
-                    crossed = (prev_y < line_y <= cy) or (prev_y > line_y >= cy)
-                    if crossed:
-                        final_label = track_best.get(track_id, (label_name, conf))[0]
-                        if final_label not in counts:
-                            counts[final_label] = 0
-                        counts[final_label] += 1
-                        counted_ids.add(track_id)
+                for (x1, y1, x2, y2), cls_id, tid in zip(boxes, clss, ids):
+                    if COUNT_CLASSES is not None and int(cls_id) not in COUNT_CLASSES:
+                        continue
 
-            # วาดกล่องและป้าย
-            cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            text = f"{label_name} {conf:.2f}"
-            cv2.putText(annotated, text, (x1, y1 - 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-            cv2.circle(annotated, (cx, cy), 3, (255, 0, 0), -1)
+                    # center point
+                    cx = (x1 + x2) // 2
+                    cy = (y1 + y2) // 2
 
-    # วาดเส้นนับจำนวน
-    cv2.line(annotated, (0, line_y), (w, line_y), line_color, 2)
+                    # วาดกล่อง/label
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.circle(frame, (cx, cy), 4, (0, 255, 255), -1)
+                    cls_name = names.get(int(cls_id), str(int(cls_id)))
+                    cv2.putText(frame, f"{cls_name} #{int(tid)}", (x1, max(20, y1 - 8)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-    # บันทึกวิดีโอผลลัพธ์
-    writer.write(annotated)
+                    # 5) Logic ข้ามเส้น (นับ 1 ครั้งต่อ track id)
+                    cur_side = side_of_line((cx, cy), LINE_P1, LINE_P2)
+                    prev_side = last_side.get(int(tid))
 
-    # แสดงผล (กด q เพื่อออก)
-    cv2.imshow("YOLO Detection", annotated)
-    if cv2.waitKey(1) & 0xFF == ord("q"):
-        break
+                    if prev_side is not None:
+                        crossed = (prev_side < 0 and cur_side > 0) or (prev_side > 0 and cur_side < 0)
+                        if crossed and int(tid) not in counted_ids:
+                            counts[cls_name] += 1
+                            counted_ids.add(int(tid))
 
-cap.release()
-writer.release()
-cv2.destroyAllWindows()
+                    last_side[int(tid)] = cur_side
 
-with open(OUT_JSON, "w", encoding="utf-8") as f:
-    json.dump(counts, f, ensure_ascii=False, indent=2)
+            # 6) แสดง FPS + counts
+            now = time.time()
+            fps = 1.0 / max(now - prev_t, 1e-6)
+            prev_t = now
+            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
 
-print("✅ Done!")
+            y = 60
+            cv2.putText(frame, "Counts:", (10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
+            y += 28
+            for k, v in sorted(counts.items()):
+                cv2.putText(frame, f"{k}: {v}", (10, y),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.85, (255, 255, 255), 2)
+                y += 24
+
+            cv2.imshow("Screen Vehicle Counting", frame)
+
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+
+    cv2.destroyAllWindows()
+    print("Final counts:", dict(counts))
+
+
+if __name__ == "__main__":
+    main()
