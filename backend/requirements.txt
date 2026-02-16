@@ -3,3 +3,7 @@ uvicorn
 motor
 python-dotenv
 pydantic
+websockets
+ultralytics
+opencv-python
+numpy

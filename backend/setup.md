@@ -33,3 +33,6 @@ uvicorn main:app --reload --port 8000
 ## Notes
 - The API exposes CORS for http://localhost:5173 by default.
 - Health check: http://localhost:8000/health
+
+
+cd /Users/tanakitchuchoed/Documents/GitHub/Project-UP-66/backend && ./env/bin/python -m uvicorn main:app --host 0.0.0.0 --port 8000 --reload

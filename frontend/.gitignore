@@ -10,6 +10,3 @@ node_modules/
 dist/
 build/
 .DS_Store
-model/
-__pycache__/
-__pycache__
